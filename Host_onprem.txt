@@ -1,0 +1,242 @@
+PHẦN 1: CÁC PHẦN MỀM CẦN CÀI TRÊN SERVER
+
+Hệ thống được thiết kế theo kiến trúc tối ưu hiệu năng:
+
+Cơ sở dữ liệu: PostgreSQL 16 (bản mặc định có sẵn trong kho apt của Ubuntu 24.04).
+Reverse Proxy & Web Server: Nginx (tiếp nhận cổng 80/443, nén gzip, serve frontend cực nhanh, chuyển tiếp /api vào Go).
+Quản lý tiến trình (Process Manager): Systemd (có sẵn trên Ubuntu, dùng để chạy Go backend dưới dạng service chạy ngầm, tự bật khi khởi động server, tự hồi sinh khi crash).
+Bảo mật mạng: UFW (Firewall chỉ mở cổng 22, 80, 443).
+Chứng chỉ SSL (Tùy chọn): Certbot (nếu có tên miền) hoặc OpenSSL (nếu dùng IP/mạng nội bộ LAN).
+
+Lời khuyên về Build: Bạn không cần cài Node.js hay Go trên server. Cách triển khai tiêu chuẩn của Go và React là build sẵn file chạy (binary) và thư mục dist trên máy phát triển, sau đó đẩy lên server. Server sẽ vô cùng nhẹ và bảo mật.
+
+PHẦN 2: CÁC BƯỚC CẤU HÌNH SERVER CHI TIẾT (TỪ A - Z)
+BƯỚC 1: Cập nhật hệ thống & Cài đặt các gói cần thiết
+
+Đăng nhập SSH vào Ubuntu Server và chạy:
+
+bash
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y curl wget git ufw nginx postgresql postgresql-contrib
+BƯỚC 2: Cấu hình cơ sở dữ liệu PostgreSQL
+
+Khởi động service PostgreSQL:
+
+bash
+sudo systemctl enable --now postgresql
+
+Tạo user và database cho hệ thống (khớp với cấu hình code):
+
+bash
+# Đăng nhập vào postgres shell
+sudo -u postgres psql
+
+Chạy các lệnh SQL sau trong dấu nhắc postgres=#:
+
+sql
+-- Tạo user 'news' với mật khẩu 'news' (hoặc bạn có thể đặt mật khẩu khác)
+CREATE USER news WITH PASSWORD 'news';
+-- Tạo database 'news' gán quyền sở hữu cho user 'news'
+CREATE DATABASE news OWNER news;
+-- Cấp toàn quyền trên database
+GRANT ALL PRIVILEGES ON DATABASE news TO news;
+-- Thoát psql
+\q
+
+Kiểm tra kết nối thử:
+
+bash
+psql -U news -d news -h localhost
+# Nhập mật khẩu: news
+# Nếu vào được dấu nhắc 'news=>' gõ '\q' để thoát.
+BƯỚC 3: Chuẩn bị thư mục ứng dụng trên Server
+
+Tạo thư mục ứng dụng tại /opt/chotluong:
+
+bash
+sudo mkdir -p /opt/chotluong/backend
+sudo mkdir -p /opt/chotluong/frontend/dist
+# Phân quyền cho user www-data (user an toàn của web server)
+sudo chown -R www-data:www-data /opt/chotluong
+BƯỚC 4: Build ứng dụng từ máy Dev và chuyển lên Server
+1. Build Frontend ReactJS (trên máy Windows dev):
+
+Mở terminal tại thư mục dự án frontend:
+
+powershell
+cd frontend
+pnpm build
+# Kết quả sinh ra thư mục 'frontend/dist'
+2. Build Backend Go Lang cho Linux amd64 (trên máy Windows dev):
+
+Mở PowerShell tại thư mục backend:
+
+powershell
+cd backend
+$env:GOOS="linux"
+$env:GOARCH="amd64"
+go build -o server ./cmd/server
+# Kết quả sinh ra file binary Linux tên là 'server'
+3. Copy file lên Ubuntu Server (dùng SCP hoặc FileZilla / WinSCP):
+
+Thay 192.168.1.100 bằng IP của Ubuntu Server của bạn:
+
+powershell
+# Đẩy binary Go lên server
+scp backend/server user@192.168.1.100:/tmp/
+# Đẩy thư mục dist lên server
+scp -r frontend/dist/* user@192.168.1.100:/tmp/dist/
+
+Trên Ubuntu Server, di chuyển file vào đúng vị trí và cấp quyền thực thi:
+
+bash
+sudo mv /tmp/server /opt/chotluong/backend/server
+sudo chmod +x /opt/chotluong/backend/server
+sudo mkdir -p /opt/chotluong/frontend/dist
+sudo mv /tmp/dist/* /opt/chotluong/frontend/dist/
+# Phân quyền lại cho www-data
+sudo chown -R www-data:www-data /opt/chotluong
+BƯỚC 5: Tạo file môi trường .env
+
+Tạo file cấu hình tại /opt/chotluong/.env:
+
+bash
+sudo nano /opt/chotluong/.env
+
+Dán nội dung sau (chỉnh sửa mật khẩu DB nếu bạn đổi):
+
+env
+DATABASE_URL=postgresql://news:news@localhost:5432/news?sslmode=disable
+JWT_SECRET=chotluong_onprem_secret_key_prod_2026_super_secure
+SERVER_PORT=8080
+GIN_MODE=release
+
+Lưu lại (Ctrl + O, Enter, Ctrl + X). Phân quyền an toàn:
+
+bash
+sudo chmod 600 /opt/chotluong/.env
+sudo chown www-data:www-data /opt/chotluong/.env
+BƯỚC 6: Cấu hình Systemd Service chạy Go Backend
+
+Tạo file service để Go tự động chạy ngầm:
+
+bash
+sudo nano /etc/systemd/system/chotluong.service
+
+Dán nội dung cấu hình sau:
+
+ini
+[Unit]
+Description=Chot Luong Go Backend Service
+After=network.target postgresql.service
+Requires=postgresql.service
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/chotluong/backend
+ExecStart=/opt/chotluong/backend/server
+Restart=always
+RestartSec=5s
+EnvironmentFile=/opt/chotluong/.env
+# Giới hạn tài nguyên an toàn
+LimitNOFILE=65535
+[Install]
+WantedBy=multi-user.target
+
+Lưu và kích hoạt service:
+
+bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now chotluong
+# Kiểm tra trạng thái xem Go Backend đã chạy thành công chưa
+sudo systemctl status chotluong
+
+(Lưu ý: Ngay lần chạy đầu tiên, mã nguồn Go tự động khởi tạo bảng database cl_articles, cl_roles, cl_users, cl_ads, cl_registrations và tự seed tài khoản ban đầu mà bạn không cần chạy lệnh SQL thủ công).
+
+BƯỚC 7: Cấu hình Nginx Web Server & Reverse Proxy
+
+Tạo file cấu hình Virtual Host:
+
+bash
+sudo nano /etc/nginx/sites-available/chotluong
+
+Dán nội dung sau (thay _ hoặc IP bằng IP/tên miền của server bạn):
+
+nginx
+server {
+    listen 80;
+    server_name _; # Hoặc điền IP máy chủ: ví dụ 192.168.1.100 hoặc domain nội bộ
+    client_max_body_size 32M;
+    # Nén Gzip tối ưu tốc độ mạng
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml image/svg+xml;
+    # Phục vụ thư mục Frontend tĩnh
+    root /opt/chotluong/frontend/dist;
+    index index.html;
+    # Cache tài nguyên tĩnh (ảnh, icon, logo, css, js)
+    location ~* \.(ico|css|js|gif|jpe?g|png|webp|svg|woff2?)$ {
+        expires 30d;
+        add_header Cache-Control "public, no-transform";
+        access_log off;
+    }
+    # Reverse Proxy chuyển tiếp các request API vào Go Server (Port 8080)
+    location /api/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+    }
+    # Single Page Application: nếu không tìm thấy file, trả về index.html
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
+
+Kích hoạt cấu hình và khởi động lại Nginx:
+
+bash
+# Bật site chotluong và tắt site mặc định
+sudo ln -s /etc/nginx/sites-available/chotluong /etc/nginx/sites-enabled/
+sudo rm -f /etc/nginx/sites-enabled/default
+# Kiểm tra cú pháp nginx
+sudo nginx -t
+# Khởi động lại Nginx
+sudo systemctl restart nginx
+BƯỚC 8: Cấu hình Tường lửa (UFW Firewall)
+
+Bảo vệ server, chỉ mở cổng cần thiết:
+
+bash
+# Bắt buộc cho phép SSH để không bị khóa kết nối
+sudo ufw allow 22/tcp
+# Cho phép HTTP và HTTPS (Nginx)
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+# Bật tường lửa
+sudo ufw enable
+sudo ufw status
+PHẦN 3: KIỂM TRA HOÀN TẤT & VẬN HÀNH
+
+Truy cập từ trình duyệt máy trạm: Gõ thẳng địa chỉ IP của server: http://<IP_UBUNTU_SERVER>
+
+Landing page Chốt Lương hiển thị đầy đủ hiệu ứng Gradient, logo và form đăng ký.
+Bấm nút "CMS Quản trị" trên thanh menu để đăng nhập với các tài khoản:
+Admin: admin@chotluong.vn / Admin@123
+Tổng biên tập (Duyệt cấp 2): tbt@chotluong.vn / Tbt@123
+Biên tập viên (Duyệt cấp 1): btv@chotluong.vn / Btv@123
+Phóng viên: phongvien@chotluong.vn / Pv@123
+
+Lệnh quản lý dịch vụ hàng ngày trên Ubuntu:
+
+Xem log backend Go thời gian thực:
+sudo journalctl -u chotluong -f
+Khởi động lại ứng dụng:
+sudo systemctl restart chotluong
+Sao lưu dữ liệu PostgreSQL định kỳ:
+pg_dump -U news -d news -F c -b -v -f /opt/chotluong/backup_$(date +%Y%m%d).dump

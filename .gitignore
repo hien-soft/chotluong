@@ -1,0 +1,18 @@
+# Dependencies
+node_modules
+.pnpm-store
+frontend/node_modules
+
+# Build artifacts & binaries
+*.exe
+/backend/server
+/backend/server.exe
+dist
+*.tsbuildinfo
+
+# Environment & local files
+.env
+.env.local
+storage
+.DS_Store
+Thumbs.db
